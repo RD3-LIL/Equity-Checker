@@ -17,6 +17,8 @@ Usage:
     open index.html
 """
 
+import argparse
+import csv
 import sqlite3
 from datetime import date
 from pathlib import Path
@@ -41,6 +43,10 @@ def b(v):
     return f"${v/1e9:.1f}B" if v is not None else "n/a"
 
 def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--no-magic", action="store_true",
+                    help="Skip the Magic Formula price fetch, builds in seconds. Use this for 500 tickers.")
+    args = ap.parse_args()
     conn = sqlite3.connect(DB)
     # Latest financials per ticker
     fin = {}
@@ -65,22 +71,60 @@ def main():
             evals[row[0]] = row
     except Exception:
         evals = {}
+    # Latest auto score per ticker, mechanical proxy, separate from human evals
+    auto = {}
+    try:
+        for row in conn.execute(
+            "SELECT ticker, score_date, quality, growth, valuation, moat, risk, total, method "
+            "FROM auto_scores ORDER BY ticker, score_date"
+        ).fetchall():
+            auto[row[0]] = row
+    except Exception:
+        auto = {}
     conn.close()
 
-    # Sort cards by Evaluator total, highest first, then by fewest RED flags.
-    # Tickers with no evaluation go at the bottom, alphabetical.
+    # Sort best first: fewest RED flags, then highest Evaluator score,
+    # then fewest YELLOW flags, then ticker. Only 7 tickers have an
+    # Evaluator score, so RED count is the main ranking for the other 493.
     def sort_key(ticker):
         ev = evals.get(ticker)
-        total = ev[7] if ev else -1
+        au = auto.get(ticker)
+        total = ev[7] if ev else (au[7] if au else -1)
         reds = sum(1 for _fy, _n, flag, _d in checks.get(ticker, []) if flag == "RED")
-        return (-total, reds, ticker)
+        yellows = sum(1 for _fy, _n, flag, _d in checks.get(ticker, []) if flag == "YELLOW")
+        return (reds, -total, yellows, ticker)
     tickers = sorted(fin.keys(), key=sort_key)
     today = date.today().isoformat()
 
+    # Company names, if sp500_constituents.csv is next to this script.
+    # Used for search by name, and shown as a tooltip, not on the tile
+    # itself, so the tiles stay small.
+    names = {}
+    sectors = {}
+    const_path = Path(__file__).with_name("sp500_constituents.csv")
+    if const_path.exists():
+        try:
+            with const_path.open(newline="", encoding="utf-8") as f:
+                for row in csv.DictReader(f):
+                    sym = row.get("Symbol", "").strip().replace(".", "-")
+                    names[sym] = row.get("Security", "").strip()
+                    sectors[sym] = row.get("GICS Sector", "").strip() or "Other"
+        except Exception:
+            names = {}
+            sectors = {}
+    # AAPL, NVDA, RIVN are not in the S&P list in this run, add them by hand
+    names.setdefault("AAPL", "Apple")
+    names.setdefault("NVDA", "Nvidia")
+    names.setdefault("RIVN", "Rivian")
+    sectors.setdefault("AAPL", "Information Technology")
+    sectors.setdefault("NVDA", "Information Technology")
+    sectors.setdefault("RIVN", "Consumer Discretionary")
+
     # Magic Formula overlay: EY and ROC per ticker, ranked.
+    # --no-magic skips the Yahoo price fetch entirely, builds in seconds.
     magic = {}
     magic_flag = None
-    if HAS_MAGIC:
+    if HAS_MAGIC and not args.no_magic:
         try:
             for ticker in tickers:
                 fy, revenue, shares = fin[ticker][1], fin[ticker][2], fin[ticker][6]
@@ -97,8 +141,11 @@ def main():
                 nwc = max(ca - cl - excess, 0)
                 tangible = nwc + ppe
                 roc = ebit / tangible if tangible else None
-                price = magic_mod.fetch_price(ticker)
-                ev = price * shares + debt_lt + debt_cur - excess if shares else None
+                try:
+                    price = magic_mod.fetch_price(ticker)
+                except Exception:
+                    price = None
+                ev = price * shares + debt_lt + debt_cur - excess if (shares and price is not None) else None
                 ey = ebit / ev if ev else None
                 magic[ticker] = {"fy": fy, "ebit": ebit, "nwc": nwc, "ppe": ppe, "roc": roc, "price": price, "ev": ev, "ey": ey}
             valid = [t for t in magic if magic[t]["roc"] is not None and magic[t]["ey"] is not None]
@@ -138,6 +185,8 @@ def main():
         result = dcf(fcf, 0.05, 0.09, 0.025, 5)
         ev, _pv, _pvt, _fcfs = result
         per_share = (ev - nd) / shares if shares else None
+        if per_share is None:
+            return "<p>DCF: N/A, missing shares outstanding.</p>"
         # sensitivity range
         vals = []
         for g in (0.03, 0.05, 0.07):
@@ -164,15 +213,23 @@ def main():
                        f"({d})<br>Quality {q}, Growth {g}, Valuation {v}, Moat {m}, Risk {r}"
                        f"{'<br>' + notes if notes else ''}</p>")
         else:
-            ev_html = "<h3>Stock Evaluator</h3><p>No evaluation saved yet.</p>"
+            au = auto.get(ticker)
+            if au:
+                _t2, d, q, g, v, m, r, total, method = au
+                ev_html = (f"<h3>Stock Evaluator, Auto score</h3><p><strong>{total}/100</strong> "
+                           f"({d}, mechanical proxy, not a human evaluation)<br>Quality {q}, Growth {g}, Valuation {v}, Moat {m}, Risk {r}</p>")
+            else:
+                ev_html = "<h3>Stock Evaluator</h3><p>No evaluation saved yet.</p>"
         m = magic.get(ticker)
-        if m:
+        if m and m.get("ey") is not None and m.get("roc") is not None and m.get("ev") is not None and m.get("price") is not None:
             flag = " <strong>MAGIC FLAG, best of this universe</strong>" if ticker == magic_flag else ""
             magic_html = (f"<h3>Magic Formula, overlay only, no points</h3>"
                           f"<p>Earnings Yield <strong>{m['ey']:.1%}</strong> (EBIT ${m['ebit']/1e9:.1f}B / EV ${m['ev']/1e9:.1f}B at ${m['price']:.2f}), "
                           f"Return on Capital <strong>{m['roc']:.1%}</strong> (EBIT / tangible ${m['nwc']/1e9:.1f}B NWC + ${m['ppe']/1e9:.1f}B PPE). "
                           f"EY rank {m.get('ey_rank', '-')}, ROC rank {m.get('roc_rank', '-')}, combined {m.get('combined', '-')}.{flag}</p>"
                           f"<p class='note'>AAPL's ROC is high because its working capital is negative and floored at 0, so tangible capital is just PPE. With only 3 tickers this is best of 3, not a top-decile market flag.</p>")
+        elif m:
+            magic_html = "<h3>Magic Formula</h3><p>Not available for this ticker, missing price or EV.</p>"
         else:
             magic_html = "<h3>Magic Formula</h3><p>Not available, needs data/*.json and a price.</p>"
         cards.append(f"""
@@ -189,20 +246,68 @@ def main():
           <p><a href="#top">Back to top</a></p>
         </section>""")
 
-    # Top table, sorted by score, highest first, each row links down to that ticker's card
-    toc_rows = ""
-    for ticker in tickers:
+    # Two views, same tiny tiles, toggled by buttons.
+    # View 1 (default): Best first, one grid, rank 1 top left.
+    # View 2: By industry (GICS Sector), best first inside each group.
+    def tile_html(ticker, rank=None):
         ev = evals.get(ticker)
-        total = ev[7] if ev else "-"
-        stance = ev[8] if ev else "-"
+        au = auto.get(ticker)
+        total = ev[7] if ev else (au[7] if au else None)
+        kind = "Human" if ev else ("Auto" if au else "-")
         reds = sum(1 for _fy, _n, flag, _d in checks.get(ticker, []) if flag == "RED")
-        toc_rows += f"<tr><td><a href='#{ticker}'>{ticker}</a></td><td>{total}</td><td>{stance}</td><td>{reds} RED</td></tr>"
+        yellows = sum(1 for _fy, _n, flag, _d in checks.get(ticker, []) if flag == "YELLOW")
+        cls = "clean" if reds == 0 else ("warn" if reds == 1 else "bad")
+        score = f"{total}/100" if total is not None else "-"
+        name = names.get(ticker, "")
+        sector = sectors.get(ticker, "Other")
+        rank_txt = f"#{rank} " if rank else ""
+        return (f"<a class='tile {cls}' href='#{ticker}' data-ticker='{ticker}' data-name='{name.upper()}' data-sector='{sector.upper()}' title='{rank_txt}{ticker} {name}, {sector}, {reds} RED, {yellows} YELLOW, {kind} score {score}'>"
+                f"<span class='sym'>{ticker}</span></a>")
+
+    best_tiles = "".join(tile_html(t, i) for i, t in enumerate(tickers, 1))
+    by_sector = {}
+    for ticker in tickers:
+        by_sector.setdefault(sectors.get(ticker, "Other"), []).append(ticker)
+    sector_blocks = ""
+    for sector in sorted(by_sector):
+        group = sorted(by_sector[sector], key=sort_key)
+        tiles = "".join(tile_html(t) for t in group)
+        sector_blocks += f"<div class='sector'><h3>{sector} ({len(group)})</h3><div class='grid'>{tiles}</div></div>"
+
     toc = f"""
-    <section class="card" id="top"><h2>All tickers, sorted by score</h2>
-    <p class="note">Highest Evaluator score first. Tickers with no evaluation yet are sorted by fewest RED flags. Click a ticker to dive into its full card below.</p>
-    <table><tr><th>Ticker</th><th>Evaluator</th><th>Stance</th><th>Checker</th></tr>
-    {toc_rows}
-    </table></section>"""
+    <section class="card" id="top"><h2>All tickers, best first</h2>
+    <p class="note">Best = fewest RED flags, then highest score, then fewest YELLOW. Green = 0 RED, yellow = 1 RED, red = 2+ RED. Hover a square for its score, click it to dive into its full card below.</p>
+    <p><button id="btn-best" onclick="showView('best')">Best first</button>
+    <button id="btn-industry" onclick="showView('industry')">By industry</button></p>
+    <input id="q" type="search" placeholder="Search ticker, company, or sector, e.g. NVDA, Nvidia, or Technology" autocomplete="off">
+    <div id="view-best"><div class="grid">{best_tiles}</div></div>
+    <div id="view-industry" style="display:none">{sector_blocks}</div>
+    <p class="note" id="count">{len(tickers)} tickers</p></section>
+    <script>
+    function showView(v) {{
+      document.getElementById('view-best').style.display = v === 'best' ? '' : 'none';
+      document.getElementById('view-industry').style.display = v === 'industry' ? '' : 'none';
+    }}
+    document.getElementById('q').addEventListener('input', function(e) {{
+      var q = e.target.value.trim().toUpperCase();
+      var shown = 0;
+      document.querySelectorAll('#view-best .tile').forEach(function(t) {{
+        var ok = !q || t.dataset.ticker.indexOf(q) !== -1 || (t.dataset.name || '').indexOf(q) !== -1 || (t.dataset.sector || '').indexOf(q) !== -1;
+        t.style.display = ok ? '' : 'none';
+        if (ok) shown++;
+      }});
+      document.querySelectorAll('#view-industry .tile').forEach(function(t) {{
+        var ok = !q || t.dataset.ticker.indexOf(q) !== -1 || (t.dataset.name || '').indexOf(q) !== -1 || (t.dataset.sector || '').indexOf(q) !== -1;
+        t.style.display = ok ? '' : 'none';
+      }});
+      document.querySelectorAll('#view-industry .sector').forEach(function(s) {{
+        var any = false;
+        s.querySelectorAll('.tile').forEach(function(t) {{ if (t.style.display !== 'none') any = true; }});
+        s.style.display = any ? '' : 'none';
+      }});
+      document.getElementById('count').textContent = shown + ' tickers shown';
+    }});
+    </script>"""
 
     # Evaluator table, all saved evaluations, sorted by score, highest first
     eval_rows = ""
@@ -220,13 +325,22 @@ def main():
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Equity Bullshit Checker, report {today}</title>
 <style>
-body {{ font-family: -apple-system, Helvetica, Arial, sans-serif; max-width: 900px; margin: 0 auto; padding: 24px; color: #1f2328; background: #f6f8fa; }}
+body {{ font-family: -apple-system, Helvetica, Arial, sans-serif; max-width: 1440px; margin: 0 auto; padding: 16px; color: #1f2328; background: #f6f8fa; }}
 h1 {{ font-size: 28px; }} h2 {{ font-size: 22px; margin-top: 0; }} h3 {{ font-size: 16px; margin-bottom: 6px; }}
 .card {{ background: #fff; border: 1px solid #d0d7de; border-radius: 12px; padding: 20px; margin: 16px 0; }}
 table {{ border-collapse: collapse; width: 100%; font-size: 14px; }}
 th, td {{ text-align: left; padding: 8px; border-bottom: 1px solid #d0d7de; vertical-align: top; }}
 th {{ background: #f6f8fa; }}
 .note {{ color: #57606a; font-size: 14px; }}
+#q {{ width: 100%; padding: 10px 12px; font-size: 16px; border: 1px solid #d0d7de; border-radius: 8px; margin: 8px 0 12px; box-sizing: border-box; }}
+.grid {{ display: grid; grid-template-columns: repeat(auto-fill, minmax(56px, 1fr)); gap: 4px; }}
+.sector {{ margin: 12px 0; }}
+.sector h3 {{ font-size: 14px; margin: 0 0 6px; color: #57606a; }}
+.tile {{ display: flex; align-items: center; justify-content: center; padding: 8px 2px; border-radius: 6px; text-decoration: none; color: #1f2328; border: 1px solid #d0d7de; background: #fff; min-height: 38px; }}
+.tile.clean {{ background: #dafbe1; border-color: #4ac26b; }}
+.tile.warn {{ background: #fff8c5; border-color: #d4a72c; }}
+.tile.bad {{ background: #ffebe9; border-color: #ff8182; }}
+.tile .sym {{ font-weight: 700; font-size: 12px; }}
 </style></head><body>
 <h1 id="top">Equity Bullshit Checker</h1>
 <p class="note">Real SEC EDGAR data, SQLite database, SQL + Python checks, DCF, and Stock Evaluator scores, all in one place. Generated {today} from equity.db. This is not a buy or sell call, and no current price is compared here.</p>

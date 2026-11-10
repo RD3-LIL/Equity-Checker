@@ -41,13 +41,17 @@ DB = HERE / "equity.db"
 DATA_DIR = HERE / "data"
 
 
+_JSON_CACHE = {}
+
 def latest_tag(ticker, tag):
     """Latest 10-K value for an EDGAR tag, or None."""
     path = DATA_DIR / f"{ticker}.json"
     if not path.exists():
         return None
-    with open(path) as f:
-        data = json.load(f)
+    if ticker not in _JSON_CACHE:
+        with open(path) as f:
+            _JSON_CACHE[ticker] = json.load(f)
+    data = _JSON_CACHE[ticker]
     fact = data.get("facts", {}).get("us-gaap", {}).get(tag)
     if not fact:
         return None

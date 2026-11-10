@@ -52,12 +52,16 @@ TAGS = {
     "debt_current": ["DebtCurrent", "LongTermDebtCurrent"],
 }
 
+_JSON_CACHE = {}
+
 def latest_tag(ticker, tag_list):
     path = DATA / f"{ticker}.json"
     if not path.exists():
         return None
-    with open(path) as f:
-        data = json.load(f)
+    if ticker not in _JSON_CACHE:
+        with open(path) as f:
+            _JSON_CACHE[ticker] = json.load(f)
+    data = _JSON_CACHE[ticker]
     facts = data.get("facts", {}).get("us-gaap", {})
     best = None
     for tag in tag_list:

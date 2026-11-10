@@ -5,7 +5,7 @@
 # This rebuilds index.html first, so GitHub Pages always matches your DB.
 set -e
 cd "$(dirname "$0")"
-python3 generate_report.py
+python3 generate_report.py --no-magic
 git add .
 git commit -m "${1:-update $(date +%Y-%m-%d)}"
 git push
