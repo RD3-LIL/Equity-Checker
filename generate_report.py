@@ -227,7 +227,7 @@ def main():
                           f"<p>Earnings Yield <strong>{m['ey']:.1%}</strong> (EBIT ${m['ebit']/1e9:.1f}B / EV ${m['ev']/1e9:.1f}B at ${m['price']:.2f}), "
                           f"Return on Capital <strong>{m['roc']:.1%}</strong> (EBIT / tangible ${m['nwc']/1e9:.1f}B NWC + ${m['ppe']/1e9:.1f}B PPE). "
                           f"EY rank {m.get('ey_rank', '-')}, ROC rank {m.get('roc_rank', '-')}, combined {m.get('combined', '-')}.{flag}</p>"
-                          f"<p class='note'>AAPL's ROC is high because its working capital is negative and floored at 0, so tangible capital is just PPE. With only 3 tickers this is best of 3, not a top-decile market flag.</p>")
+                          f"<p class='note'>Combined rank is across all tickers with a valid Magic score in this run. ROC can be very high when tangible capital is tiny, NWC is floored at 0, so treat ROC over about 200% with caution, it is a small-denominator quirk, not a 200%+ return on capital.</p>")
         elif m:
             magic_html = "<h3>Magic Formula</h3><p>Not available for this ticker, missing price or EV.</p>"
         else:
@@ -279,9 +279,25 @@ def main():
     if magic_valid:
         magic_tiles = "".join(tile_html(t, i) for i, t in enumerate(magic_valid, 1))
         magic_note = f"{len(magic_valid)} tickers with a Magic score, {len(tickers) - len(magic_valid)} missing price or EV."
+        # Leaderboard table, so Magic sorting is visible, not just in the tiny tiles.
+        # The full cards below stay in Best first order, this table is the Magic order.
+        magic_rows = ""
+        for i, t in enumerate(magic_valid, 1):
+            mg = magic[t]
+            reds = sum(1 for _fy, _n, flag, _d in checks.get(t, []) if flag == "RED")
+            ev = evals.get(t)
+            au = auto.get(t)
+            total = ev[7] if ev else (au[7] if au else "-")
+            magic_rows += (f"<tr><td>{i}</td><td><a href='#{t}'>{t}</a></td>"
+                           f"<td>{mg['ey']:.1%}</td><td>{mg['roc']:.1%}</td>"
+                           f"<td>{mg.get('ey_rank', '-')}</td><td>{mg.get('roc_rank', '-')}</td>"
+                           f"<td><strong>{mg.get('combined', '-')}</strong></td><td>{reds}</td><td>{total}</td></tr>")
+        magic_table = (f"<table><tr><th>Magic rank</th><th>Ticker</th><th>EY</th><th>ROC</th>"
+                       f"<th>EY rank</th><th>ROC rank</th><th>Combined</th><th>RED</th><th>Score</th></tr>{magic_rows}</table>")
     else:
         magic_tiles = ""
         magic_note = "No Magic scores in this build. Run python3 generate_report.py with no --no-magic to get prices and Magic ranks."
+        magic_table = ""
     by_sector = {}
     for ticker in tickers:
         by_sector.setdefault(sectors.get(ticker, "Other"), []).append(ticker)
@@ -300,7 +316,7 @@ def main():
     <input id="q" type="search" placeholder="Search ticker, company, or sector, e.g. NVDA, Nvidia, or Technology" autocomplete="off">
     <div id="view-best"><div class="grid">{best_tiles}</div></div>
     <div id="view-industry" style="display:none">{sector_blocks}</div>
-    <div id="view-magic" style="display:none"><p class="note">{magic_note}</p><div class="grid">{magic_tiles}</div></div>
+    <div id="view-magic" style="display:none"><p class="note">{magic_note} Sorted by combined rank, lowest first. The full cards below stay in Best first order, this table is the Magic order.</p><div class="grid">{magic_tiles}</div>{magic_table}</div>
     <p class="note" id="count">{len(tickers)} tickers</p></section>
     <script>
     function showView(v) {{
