@@ -261,10 +261,27 @@ def main():
         name = names.get(ticker, "")
         sector = sectors.get(ticker, "Other")
         rank_txt = f"#{rank} " if rank else ""
-        return (f"<a class='tile {cls}' href='#{ticker}' data-ticker='{ticker}' data-name='{name.upper()}' data-sector='{sector.upper()}' title='{rank_txt}{ticker} {name}, {sector}, {reds} RED, {yellows} YELLOW, {kind} score {score}'>"
+        mg = magic.get(ticker)
+        magic_txt = ""
+        if mg and mg.get("ey") is not None and mg.get("roc") is not None:
+            magic_txt = f", EY {mg['ey']:.1%}, ROC {mg['roc']:.1%}, Magic combined {mg.get('combined', '-')}"
+        return (f"<a class='tile {cls}' href='#{ticker}' data-ticker='{ticker}' data-name='{name.upper()}' data-sector='{sector.upper()}' title='{rank_txt}{ticker} {name}, {sector}, {reds} RED, {yellows} YELLOW, {kind} score {score}{magic_txt}'>"
                 f"<span class='sym'>{ticker}</span></a>")
 
     best_tiles = "".join(tile_html(t, i) for i, t in enumerate(tickers, 1))
+    # View 3: By Magic Formula, lowest combined rank first.
+    # Combined = EY rank + ROC rank, so best Magic is #1.
+    # Only tickers with a valid EY and ROC appear here.
+    magic_valid = sorted(
+        [t for t in magic if magic[t].get("combined") is not None],
+        key=lambda t: (magic[t]["combined"], magic[t].get("ey_rank", 999), magic[t].get("roc_rank", 999), t),
+    )
+    if magic_valid:
+        magic_tiles = "".join(tile_html(t, i) for i, t in enumerate(magic_valid, 1))
+        magic_note = f"{len(magic_valid)} tickers with a Magic score, {len(tickers) - len(magic_valid)} missing price or EV."
+    else:
+        magic_tiles = ""
+        magic_note = "No Magic scores in this build. Run python3 generate_report.py with no --no-magic to get prices and Magic ranks."
     by_sector = {}
     for ticker in tickers:
         by_sector.setdefault(sectors.get(ticker, "Other"), []).append(ticker)
@@ -278,15 +295,18 @@ def main():
     <section class="card" id="top"><h2>All tickers, best first</h2>
     <p class="note">Best = fewest RED flags, then highest score, then fewest YELLOW. Green = 0 RED, yellow = 1 RED, red = 2+ RED. Hover a square for its score, click it to dive into its full card below.</p>
     <p><button id="btn-best" onclick="showView('best')">Best first</button>
-    <button id="btn-industry" onclick="showView('industry')">By industry</button></p>
+    <button id="btn-industry" onclick="showView('industry')">By industry</button>
+    <button id="btn-magic" onclick="showView('magic')">By Magic</button></p>
     <input id="q" type="search" placeholder="Search ticker, company, or sector, e.g. NVDA, Nvidia, or Technology" autocomplete="off">
     <div id="view-best"><div class="grid">{best_tiles}</div></div>
     <div id="view-industry" style="display:none">{sector_blocks}</div>
+    <div id="view-magic" style="display:none"><p class="note">{magic_note}</p><div class="grid">{magic_tiles}</div></div>
     <p class="note" id="count">{len(tickers)} tickers</p></section>
     <script>
     function showView(v) {{
       document.getElementById('view-best').style.display = v === 'best' ? '' : 'none';
       document.getElementById('view-industry').style.display = v === 'industry' ? '' : 'none';
+      document.getElementById('view-magic').style.display = v === 'magic' ? '' : 'none';
     }}
     document.getElementById('q').addEventListener('input', function(e) {{
       var q = e.target.value.trim().toUpperCase();
@@ -297,6 +317,10 @@ def main():
         if (ok) shown++;
       }});
       document.querySelectorAll('#view-industry .tile').forEach(function(t) {{
+        var ok = !q || t.dataset.ticker.indexOf(q) !== -1 || (t.dataset.name || '').indexOf(q) !== -1 || (t.dataset.sector || '').indexOf(q) !== -1;
+        t.style.display = ok ? '' : 'none';
+      }});
+      document.querySelectorAll('#view-magic .tile').forEach(function(t) {{
         var ok = !q || t.dataset.ticker.indexOf(q) !== -1 || (t.dataset.name || '').indexOf(q) !== -1 || (t.dataset.sector || '').indexOf(q) !== -1;
         t.style.display = ok ? '' : 'none';
       }});
