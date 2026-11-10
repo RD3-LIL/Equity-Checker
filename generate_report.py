@@ -27,6 +27,14 @@ OUT = HERE / "index.html"
 
 from dcf import dcf, net_debt
 
+# Magic Formula overlay, best effort, needs data/*.json and a price feed.
+# If it fails, the report still builds without the Magic section.
+try:
+    import magic as magic_mod
+    HAS_MAGIC = True
+except Exception:
+    HAS_MAGIC = False
+
 FLAG_COLOR = {"GREEN": "#1a7f37", "YELLOW": "#9a6700", "RED": "#cf222e"}
 
 def b(v):
@@ -59,8 +67,52 @@ def main():
         evals = {}
     conn.close()
 
-    tickers = sorted(fin.keys())
+    # Sort cards by Evaluator total, highest first, then by fewest RED flags.
+    # Tickers with no evaluation go at the bottom, alphabetical.
+    def sort_key(ticker):
+        ev = evals.get(ticker)
+        total = ev[7] if ev else -1
+        reds = sum(1 for _fy, _n, flag, _d in checks.get(ticker, []) if flag == "RED")
+        return (-total, reds, ticker)
+    tickers = sorted(fin.keys(), key=sort_key)
     today = date.today().isoformat()
+
+    # Magic Formula overlay: EY and ROC per ticker, ranked.
+    magic = {}
+    magic_flag = None
+    if HAS_MAGIC:
+        try:
+            for ticker in tickers:
+                fy, revenue, shares = fin[ticker][1], fin[ticker][2], fin[ticker][6]
+                ebit = magic_mod.latest_tag(ticker, magic_mod.TAGS["ebit"])
+                ca = magic_mod.latest_tag(ticker, magic_mod.TAGS["current_assets"])
+                cl = magic_mod.latest_tag(ticker, magic_mod.TAGS["current_liabilities"])
+                cash = magic_mod.latest_tag(ticker, magic_mod.TAGS["cash"]) or 0
+                ppe = magic_mod.latest_tag(ticker, magic_mod.TAGS["ppe"])
+                debt_lt = magic_mod.latest_tag(ticker, magic_mod.TAGS["debt_lt"]) or 0
+                debt_cur = magic_mod.latest_tag(ticker, magic_mod.TAGS["debt_current"]) or 0
+                if ebit is None or ca is None or cl is None or ppe is None:
+                    continue
+                excess = max(cash - 0.03 * (revenue or 0), 0)
+                nwc = max(ca - cl - excess, 0)
+                tangible = nwc + ppe
+                roc = ebit / tangible if tangible else None
+                price = magic_mod.fetch_price(ticker)
+                ev = price * shares + debt_lt + debt_cur - excess if shares else None
+                ey = ebit / ev if ev else None
+                magic[ticker] = {"fy": fy, "ebit": ebit, "nwc": nwc, "ppe": ppe, "roc": roc, "price": price, "ev": ev, "ey": ey}
+            valid = [t for t in magic if magic[t]["roc"] is not None and magic[t]["ey"] is not None]
+            if len(valid) >= 2:
+                ey_rank = {t: i+1 for i, t in enumerate(sorted(valid, key=lambda t: -magic[t]["ey"]))}
+                roc_rank = {t: i+1 for i, t in enumerate(sorted(valid, key=lambda t: -magic[t]["roc"]))}
+                for t in valid:
+                    magic[t]["ey_rank"] = ey_rank[t]
+                    magic[t]["roc_rank"] = roc_rank[t]
+                    magic[t]["combined"] = ey_rank[t] + roc_rank[t]
+                magic_flag = min(valid, key=lambda t: magic[t]["combined"])
+        except Exception:
+            magic = {}
+            magic_flag = None
 
     def checker_rows(ticker):
         rows = checks.get(ticker, [])
@@ -113,23 +165,51 @@ def main():
                        f"{'<br>' + notes if notes else ''}</p>")
         else:
             ev_html = "<h3>Stock Evaluator</h3><p>No evaluation saved yet.</p>"
+        m = magic.get(ticker)
+        if m:
+            flag = " <strong>MAGIC FLAG, best of this universe</strong>" if ticker == magic_flag else ""
+            magic_html = (f"<h3>Magic Formula, overlay only, no points</h3>"
+                          f"<p>Earnings Yield <strong>{m['ey']:.1%}</strong> (EBIT ${m['ebit']/1e9:.1f}B / EV ${m['ev']/1e9:.1f}B at ${m['price']:.2f}), "
+                          f"Return on Capital <strong>{m['roc']:.1%}</strong> (EBIT / tangible ${m['nwc']/1e9:.1f}B NWC + ${m['ppe']/1e9:.1f}B PPE). "
+                          f"EY rank {m.get('ey_rank', '-')}, ROC rank {m.get('roc_rank', '-')}, combined {m.get('combined', '-')}.{flag}</p>"
+                          f"<p class='note'>AAPL's ROC is high because its working capital is negative and floored at 0, so tangible capital is just PPE. With only 3 tickers this is best of 3, not a top-decile market flag.</p>")
+        else:
+            magic_html = "<h3>Magic Formula</h3><p>Not available, needs data/*.json and a price.</p>"
         cards.append(f"""
-        <section class="card">
+        <section class="card" id="{ticker}">
           <h2>{ticker}</h2>
           <p>FY{fy}: revenue {b(rev)}, net income {b(ni)}, OCF {b(ocf)}, FCF {b(fcf)}</p>
           <p><strong>{reds} RED, {yellows} YELLOW</strong> in the latest checks</p>
           <h3>Bullshit checker</h3>
           {checker_rows(ticker)}
           {ev_html}
+          {magic_html}
           <h3>DCF</h3>
           {dcf_block(ticker)}
+          <p><a href="#top">Back to top</a></p>
         </section>""")
 
-    # Evaluator table, all saved evaluations
+    # Top table, sorted by score, highest first, each row links down to that ticker's card
+    toc_rows = ""
+    for ticker in tickers:
+        ev = evals.get(ticker)
+        total = ev[7] if ev else "-"
+        stance = ev[8] if ev else "-"
+        reds = sum(1 for _fy, _n, flag, _d in checks.get(ticker, []) if flag == "RED")
+        toc_rows += f"<tr><td><a href='#{ticker}'>{ticker}</a></td><td>{total}</td><td>{stance}</td><td>{reds} RED</td></tr>"
+    toc = f"""
+    <section class="card" id="top"><h2>All tickers, sorted by score</h2>
+    <p class="note">Highest Evaluator score first. Tickers with no evaluation yet are sorted by fewest RED flags. Click a ticker to dive into its full card below.</p>
+    <table><tr><th>Ticker</th><th>Evaluator</th><th>Stance</th><th>Checker</th></tr>
+    {toc_rows}
+    </table></section>"""
+
+    # Evaluator table, all saved evaluations, sorted by score, highest first
     eval_rows = ""
-    for ticker in sorted(evals):
+    for ticker in sorted(evals, key=lambda t: (-evals[t][7], t)):
         _t, d, q, g, v, m, r, total, stance, _n = evals[ticker]
-        eval_rows += f"<tr><td>{ticker}</td><td>{d}</td><td>{q}</td><td>{g}</td><td>{v}</td><td>{m}</td><td>{r}</td><td><strong>{total}</strong></td><td>{stance}</td></tr>"
+        link = f"<a href='#{ticker}'>{ticker}</a>" if ticker in fin else ticker
+        eval_rows += f"<tr><td>{link}</td><td>{d}</td><td>{q}</td><td>{g}</td><td>{v}</td><td>{m}</td><td>{r}</td><td><strong>{total}</strong></td><td>{stance}</td></tr>"
     eval_table = f"""
     <section class="card"><h2>Stock Evaluator, all saved</h2>
     <table><tr><th>Ticker</th><th>Date</th><th>Q</th><th>G</th><th>V</th><th>M</th><th>R</th><th>Total</th><th>Stance</th></tr>
@@ -148,8 +228,9 @@ th, td {{ text-align: left; padding: 8px; border-bottom: 1px solid #d0d7de; vert
 th {{ background: #f6f8fa; }}
 .note {{ color: #57606a; font-size: 14px; }}
 </style></head><body>
-<h1>Equity Bullshit Checker</h1>
+<h1 id="top">Equity Bullshit Checker</h1>
 <p class="note">Real SEC EDGAR data, SQLite database, SQL + Python checks, DCF, and Stock Evaluator scores, all in one place. Generated {today} from equity.db. This is not a buy or sell call, and no current price is compared here.</p>
+{toc}
 {''.join(cards)}
 {eval_table}
 <p class="note">Method: Possessions and efficiency are not used here, this is equities. Checks: cash conversion, accruals, receivables vs revenue, dilution, profitability, leverage, cash burn. DCF: 5 years FCF growth, WACC discount, terminal value, minus net debt, divided by shares. Evaluator: Quality, Growth, Valuation, Moat, Risk, each 1-5, total = sum / 25 x 100. Bullshit checker is a veto, a RED flag does not change a score, it blocks a Buy on its own.</p>

@@ -50,8 +50,11 @@ COMPANIES = {
 # EDGAR US-GAAP tags. Tag names change over time and by filer,
 # so we try several and pick the latest-filed value per fiscal year.
 TAGS = {
-    "revenue": ["RevenueFromContractWithCustomerExcludingAssessedTax", "SalesRevenueNet", "Revenues"],
-    "net_income": ["NetIncomeLoss"],
+    # Tag drift: newer filings often use ProfitLoss instead of NetIncomeLoss,
+    # and RevenueFromContractWithCustomerIncludingAssessedTax instead of Revenues.
+    # Keep all candidates, pick_annual keeps the latest-filed value per year.
+    "revenue": ["RevenueFromContractWithCustomerExcludingAssessedTax", "RevenueFromContractWithCustomerIncludingAssessedTax", "SalesRevenueNet", "Revenues"],
+    "net_income": ["NetIncomeLoss", "ProfitLoss", "NetIncomeLossAvailableToCommonStockholdersBasic"],
     "operating_cash_flow": ["NetCashProvidedByUsedInOperatingActivities", "NetCashProvidedByUsedInOperatingActivitiesContinuingOperations", "NetCashProvidedByOperatingActivities"],
     "capex": ["PaymentsToAcquirePropertyPlantAndEquipment"],
     "total_assets": ["Assets"],
